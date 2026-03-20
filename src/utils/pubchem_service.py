@@ -11,6 +11,8 @@ import pubchempy as pcp
 from rdkit import Chem
 from rdkit.Chem import inchi
 
+from src.utils.rdkit_smiles import mol_from_smiles_lenient
+
 
 def _extract_synonyms(cid: int, limit: int = 20) -> List[str]:
     """Fetch and normalize PubChem synonyms for a compound CID."""
@@ -93,9 +95,9 @@ def get_molecule_info(smiles: str) -> Dict[str, Any]:
         return payload
 
     normalized_smiles = smiles.strip()
-    mol = Chem.MolFromSmiles(normalized_smiles)
+    mol, parse_err = mol_from_smiles_lenient(normalized_smiles)
     if mol is None:
-        payload["errors"].append("Invalid SMILES string (RDKit validation failed).")
+        payload["errors"].append(parse_err or "Invalid SMILES string (RDKit validation failed).")
         return payload
 
     canonical_smiles = Chem.MolToSmiles(mol, canonical=True)

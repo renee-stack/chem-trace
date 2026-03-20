@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from rdkit import Chem
 
 from src.utils.pubchem_service import get_molecule_info
+from src.utils.rdkit_smiles import mol_from_smiles_lenient
 
 try:
     from dotenv import load_dotenv
@@ -275,9 +276,11 @@ class ChemistryAgent:
             return response
 
         input_smiles = smiles.strip()
-        mol = Chem.MolFromSmiles(input_smiles)
+        mol, parse_err = mol_from_smiles_lenient(input_smiles)
         if mol is None:
-            response["errors"].append("Invalid SMILES string (RDKit validation failed).")
+            response["errors"].append(
+                parse_err or "Invalid SMILES string (RDKit validation failed)."
+            )
             return response
 
         molecule_info = get_molecule_info(input_smiles)

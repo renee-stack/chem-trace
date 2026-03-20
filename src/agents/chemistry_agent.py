@@ -2,11 +2,20 @@
 
 import json
 import os
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from rdkit import Chem
 
 from src.utils.pubchem_service import get_molecule_info
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional dependency
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv()
 
 
 class ChemistryAgent:
@@ -32,7 +41,7 @@ class ChemistryAgent:
     Rules:
     1. Each step must include: Reaction Name, Reagents, Estimated Yield (0.0 to 1.0), and a plausible Literature Citation.
     2. Ensure all intermediates are chemically valid.
-    3. Output ONLY a JSON array of steps.
+    3. Output ONLY a JSON array of steps (raw JSON). Do not use markdown, code fences, or any text before or after the array.
 
     JSON Format:
     [
@@ -45,6 +54,79 @@ class ChemistryAgent:
       }}
     ]
     """
+
+    @staticmethod
+    def _coerce_parsed_to_steps(parsed: Any) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+        """Normalize parsed JSON into a list of step dicts."""
+        if isinstance(parsed, list):
+            return parsed, None
+        if isinstance(parsed, dict):
+            if "steps" in parsed and isinstance(parsed["steps"], list):
+                return parsed["steps"], None
+            return None, "LLM JSON object does not contain a 'steps' array."
+        return None, "LLM output must be a JSON array or an object with 'steps'."
+
+    @classmethod
+    def _parse_llm_route_json(cls, raw_text: str) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+        """Parse model output: strip fences, then JSON array or object with steps."""
+        text = (raw_text or "").strip()
+        if not text:
+            return None, "LLM returned empty response."
+
+        fence = re.search(r"```(?:json)?\s*\n?(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+        if fence:
+            text = fence.group(1).strip()
+
+        def try_load(s: str) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+            try:
+                parsed = json.loads(s)
+            except json.JSONDecodeError as exc:
+                return None, str(exc)
+            steps, err = cls._coerce_parsed_to_steps(parsed)
+            if err:
+                return None, err
+            return steps, None
+
+        steps, err = try_load(text)
+        if steps is not None:
+            return steps, None
+
+        # Bracket-scan: first top-level JSON array
+        start = text.find("[")
+        if start != -1:
+            depth = 0
+            for i in range(start, len(text)):
+                ch = text[i]
+                if ch == "[":
+                    depth += 1
+                elif ch == "]":
+                    depth -= 1
+                    if depth == 0:
+                        snippet = text[start : i + 1]
+                        steps2, err2 = try_load(snippet)
+                        if steps2 is not None:
+                            return steps2, None
+                        break
+
+        # Brace-scan: object that may contain "steps"
+        start_o = text.find("{")
+        if start_o != -1:
+            depth = 0
+            for i in range(start_o, len(text)):
+                ch = text[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        snippet = text[start_o : i + 1]
+                        steps3, err3 = try_load(snippet)
+                        if steps3 is not None:
+                            return steps3, None
+                        break
+
+        preview = text[:240].replace("\n", " ")
+        return None, f"Failed to parse LLM JSON ({err or 'no valid array/object'}). Preview: {preview!r}"
 
     def generate_route_with_llm(self, smiles: str, chem_data: Dict[str, Any]) -> Dict[str, Any]:
         """Generate a route with Anthropic/OpenAI and return a data-contract JSON object."""
@@ -63,13 +145,50 @@ class ChemistryAgent:
                 from anthropic import Anthropic  # type: ignore
 
                 client = Anthropic(api_key=anthropic_key)
-                model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
-                completion = client.messages.create(
-                    model=model,
-                    max_tokens=1400,
-                    temperature=0.2,
-                    messages=[{"role": "user", "content": prompt}],
-                )
+                # `claude-3-5-sonnet-latest` and similar aliases often 404 on the current API.
+                # Override with ANTHROPIC_MODEL in .env (see Anthropic docs for IDs).
+                preferred = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+                fallback_models = ["claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-6"]
+                candidates: List[str] = []
+                for m in [preferred, *fallback_models]:
+                    if m and m not in candidates:
+                        candidates.append(m)
+
+                last_exc: Optional[Exception] = None
+                completion = None
+                for candidate in candidates:
+                    try:
+                        completion = client.messages.create(
+                            model=candidate,
+                            max_tokens=1400,
+                            temperature=0.2,
+                            system=(
+                                "You output only valid JSON: a single JSON array of route steps, "
+                                "or a JSON object with a 'steps' key. No markdown or code fences."
+                            ),
+                            messages=[{"role": "user", "content": prompt}],
+                        )
+                        model = candidate
+                        break
+                    except Exception as exc:  # pragma: no cover - network/API
+                        err_s = str(exc).lower()
+                        if "404" in str(exc) or "not_found" in err_s:
+                            last_exc = exc
+                            continue
+                        raise
+
+                if completion is None:
+                    return {
+                        "status": "error",
+                        "provider": "anthropic",
+                        "model": preferred,
+                        "steps": [],
+                        "errors": [
+                            "Anthropic model not found (404). Set ANTHROPIC_MODEL to a valid ID "
+                            f"(e.g. claude-sonnet-4-6). Last error: {last_exc}"
+                        ],
+                    }
+
                 provider = "anthropic"
                 raw_text = "".join(
                     block.text for block in completion.content if getattr(block, "type", "") == "text"
@@ -84,7 +203,13 @@ class ChemistryAgent:
                     temperature=0.2,
                     response_format={"type": "json_object"},
                     messages=[
-                        {"role": "system", "content": "Return only JSON."},
+                        {
+                            "role": "system",
+                            "content": (
+                                "Return only JSON: either a JSON object with key 'steps' (array of steps) "
+                                "or a raw JSON array. No markdown or code fences."
+                            ),
+                        },
                         {"role": "user", "content": prompt},
                     ],
                 )
@@ -107,37 +232,14 @@ class ChemistryAgent:
                 "errors": [f"LLM request failed: {exc}"],
             }
 
-        parsed_steps: List[Dict[str, Any]]
-        try:
-            parsed = json.loads(raw_text)
-            if isinstance(parsed, dict):
-                if "steps" in parsed and isinstance(parsed["steps"], list):
-                    parsed_steps = parsed["steps"]
-                else:
-                    return {
-                        "status": "error",
-                        "provider": provider,
-                        "model": model,
-                        "steps": [],
-                        "errors": ["LLM JSON does not contain a valid 'steps' array."],
-                    }
-            elif isinstance(parsed, list):
-                parsed_steps = parsed
-            else:
-                return {
-                    "status": "error",
-                    "provider": provider,
-                    "model": model,
-                    "steps": [],
-                    "errors": ["LLM output JSON must be an array of steps or object with 'steps'."],
-                }
-        except Exception as exc:
+        parsed_steps, parse_err = self._parse_llm_route_json(raw_text)
+        if parse_err or parsed_steps is None:
             return {
                 "status": "error",
                 "provider": provider,
                 "model": model,
                 "steps": [],
-                "errors": [f"Failed to parse LLM JSON output: {exc}"],
+                "errors": [parse_err or "Failed to parse LLM JSON output."],
             }
 
         return {
@@ -180,16 +282,19 @@ class ChemistryAgent:
 
         molecule_info = get_molecule_info(input_smiles)
         response["molecule_info"] = molecule_info
-        if molecule_info["status"] != "success":
+        if molecule_info["status"] not in {"success", "partial"}:
             response["errors"].extend(molecule_info.get("errors", []))
             return response
 
         if input_smiles == self.ASPIRIN_SMILES:
             route_plan = self._aspirin_route()
         else:
+            mol_blob = molecule_info.get("molecule") or {}
+            synonyms = mol_blob.get("synonyms") or []
+            first_syn = synonyms[0] if synonyms else None
             chem_data = {
-                "name": molecule_info["molecule"].get("iupac_name") or "UNKNOWN_TARGET",
-                "weight": molecule_info["molecule"].get("molecular_weight"),
+                "name": mol_blob.get("iupac_name") or first_syn or "UNKNOWN_TARGET",
+                "weight": mol_blob.get("molecular_weight"),
             }
             llm_route = self.generate_route_with_llm(input_smiles, chem_data)
             if llm_route["status"] == "success":
@@ -218,6 +323,7 @@ class ChemistryAgent:
                 response["errors"].extend(llm_route.get("errors", []))
                 route_plan = self._template_route(input_smiles)
                 route_plan["route_type"] = "template_fallback"
+                route_plan["target_name"] = chem_data["name"]
 
         response["status"] = "success"
         response["route_plan"] = route_plan

@@ -7,6 +7,8 @@ import sys
 # Add project root for src imports when run from repository root.
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
 
+import pubchempy as pcp
+
 from src.agents.chemistry_agent import ChemistryAgent
 
 
@@ -28,6 +30,18 @@ def main() -> None:
 
         if not user_input:
             continue
+
+        if not any(char in user_input for char in ["=", "(", ")", "#", "[", "]"]):
+            print(f"Attempting to resolve name '{user_input}' to SMILES...")
+            try:
+                results = pcp.get_compounds(user_input, "name")
+                if results and results[0].isomeric_smiles:
+                    user_input = results[0].isomeric_smiles
+                    print(f"Resolved to: {user_input}")
+                else:
+                    print("Could not resolve name to SMILES. Proceeding with raw input.")
+            except Exception as exc:
+                print(f"Name resolution failed: {exc}. Proceeding with raw input.")
 
         print(f"Scouting {user_input}...")
 

@@ -1,0 +1,7 @@
+# ChemTrace — Person C chemistry stack
+anthropic>=0.40.0
+python-dotenv>=1.0.0
+pubchempy>=1.0.4
+rdkit>=2023.9.1
+# Optional: OpenAI fallback in chemistry_agent.generate_route_with_llm
+# openai>=1.0.0

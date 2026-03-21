@@ -285,7 +285,7 @@ class ChemistryAgent:
 
         molecule_info = get_molecule_info(input_smiles)
         response["molecule_info"] = molecule_info
-        if molecule_info["status"] not in {"success", "partial"}:
+        if molecule_info["status"] not in {"success", "partial", "success_inferred"}:
             response["errors"].extend(molecule_info.get("errors", []))
             return response
 

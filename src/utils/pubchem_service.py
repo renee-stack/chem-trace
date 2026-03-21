@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import pubchempy as pcp
 from rdkit import Chem
-from rdkit.Chem import inchi
+from rdkit.Chem import Descriptors, inchi
 
 from src.utils.rdkit_smiles import mol_from_smiles_lenient
 
@@ -78,7 +78,7 @@ def get_molecule_info(smiles: str) -> Dict[str, Any]:
 
     Returns:
         JSON-serializable dictionary:
-        - status: "success" or "error"
+        - status: "success", "success_inferred", or "error"
         - input_smiles: Original input value
         - molecule: Molecular metadata on success, otherwise None
         - errors: List of error messages
@@ -105,18 +105,18 @@ def get_molecule_info(smiles: str) -> Dict[str, Any]:
     compounds = _resolve_compounds_from_pubchem(mol, normalized_smiles, canonical_smiles)
 
     if not compounds:
-        payload["status"] = "partial"
+        payload["status"] = "success_inferred"
         payload["molecule"] = {
-            "cid": None,
+            "cid": "NOVEL_COMPOUND",
             "smiles": normalized_smiles,
             "canonical_smiles": canonical_smiles,
             "iupac_name": None,
-            "molecular_weight": None,
+            "molecular_weight": round(float(Descriptors.MolWt(mol)), 4),
             "synonyms": [],
-            "xlogp": None,
+            "xlogp": round(float(Descriptors.MolLogP(mol)), 4),
         }
         payload["errors"].append(
-            "No PubChem match after SMILES, identity, and InChIKey lookup attempts."
+            "No PubChem match found; returned inferred RDKit descriptors."
         )
         return payload
 

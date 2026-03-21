@@ -4,6 +4,8 @@ import json
 import os
 import sys
 
+from decision_engine import evaluate_chemtrace_output
+
 # Add project root for src imports when run from repository root.
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
 
@@ -47,13 +49,38 @@ def main() -> None:
 
         try:
             result = agent.scout_synthesis(user_input)
+
             if result.get("status") == "error":
                 print("Error(s):")
                 for err in result.get("errors", []):
                     print(f"- {err}")
-            else:
-                print("\nDATA RETRIEVED:")
-                print(json.dumps(result, indent=2))
+                continue
+
+            print("\nDATA RETRIEVED:")
+            print(json.dumps(result, indent=2))
+
+            ranked_routes = evaluate_chemtrace_output(result)
+
+            print("\n========================================")
+            print("DECISION ENGINE OUTPUT")
+            print("========================================")
+            print(json.dumps(ranked_routes, indent=2))
+
+            if ranked_routes:
+                best_route = ranked_routes[0]
+                print("\n========================================")
+                print("BEST ROUTE SUMMARY")
+                print("========================================")
+                print(f"Route ID: {best_route['route_id']}")
+                print(f"Score: {best_route['score']}")
+                print(f"Status: {best_route['status']}")
+                print(f"Estimated Cost per Gram: {best_route['cost_per_gram']}")
+                print(f"Supply Chain Risk: {best_route['supply_chain_risk']}")
+                print(f"Regulatory Risk: {best_route['regulatory_risk']}")
+                print(f"Step Count: {best_route['step_count']}")
+                print(f"Yield Estimate: {best_route['yield_estimate']}")
+                print(f"Reason: {best_route['decision_reason']}")
+
         except Exception as exc:
             print(f"Critical failure: {exc}")
 
